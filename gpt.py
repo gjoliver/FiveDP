@@ -311,7 +311,7 @@ def _init_dist(world_size: int, rank: int):
     dist.init_process_group("gloo", rank=rank, world_size=world_size)
 
 
-def _apply_hsdp(model, device_mesh):
+def _apply_hsdp(model, device_mesh) -> torch.nn.Module:
     return FSDP(
         model,
         device_mesh=device_mesh,
@@ -321,7 +321,7 @@ def _apply_hsdp(model, device_mesh):
     )
 
 
-def _apply_sp_tp(model, stp_mesh):
+def _apply_sp_tp(model, stp_mesh) -> torch.nn.Module:
     # Apply sequence parallel to model level modules.
     # Namely, we want to shard input embeddings (wte and wpe) ColumnWise
     # for input into the transformer blocks.
@@ -379,6 +379,8 @@ def _apply_sp_tp(model, stp_mesh):
             device_mesh=stp_mesh,
             parallelize_plan=layer_plan,
         )
+    
+    return model
 
 
 def train(world_size: int, rank: int):
