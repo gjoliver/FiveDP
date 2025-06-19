@@ -392,14 +392,19 @@ def _apply_sp_tp(model, stp_mesh) -> torch.nn.Module:
 def train(world_size: int, rank: int):
     _init_dist(world_size, rank)
 
+    device = torch.device(f"cuda:{rank}")
+
     # 2D device mesh on CPU.
     # Simulate DDP between instances, and FSDP between GPUs on a same instance.
+    #device_mesh = dist.init_device_mesh(
+    #    device_type="cuda", mesh_shape=(2, 2, 2), mesh_dim_names=("ddp", "fsdp", "sp/tp")
+    #)
     device_mesh = dist.init_device_mesh(
-        device_type="cuda", mesh_shape=(2, 2, 2), mesh_dim_names=("ddp", "fsdp", "sp/tp")
+        device_type="cuda", mesh_shape=(8,), mesh_dim_names=("sp/tp",)
     )
 
     # Prepare the model.
-    gpt = GPT(GPTConfig())
+    gpt = GPT(GPTConfig()).to(device)
     # HSDP: Inter-node DDP + intra-node FSDP.
     gpt = _apply_hsdp(gpt, device_mesh["ddp", "fsdp"])
     # SP & TP.
@@ -421,16 +426,16 @@ def train(world_size: int, rank: int):
         # Input and labels.
         inputs = tokenizer(batch, padding=True, truncation=True, return_tensors='pt')
 
-        input_ids = inputs["input_ids"]
+        input_ids = inputs["input_ids"].to(device)
         # Mask out paddings.
-        attn_mask = inputs["attention_mask"].to(torch.bool)
+        attn_mask = inputs["attention_mask"].to(torch.bool).to(device)
         input_ids[~attn_mask] = IGNORE_INDEX
 
         # Compute probabilities.
         logits = gpt.forward(input_ids=input_ids, is_training=True)
 
-        shifted_logits = logits[..., :-1, :].contiguous().to("cuda")
-        shifted_labels = input_ids[..., 1:].contiguous().to("cuda")
+        shifted_logits = logits[..., :-1, :].contiguous()
+        shifted_labels = input_ids[..., 1:].contiguous()
 
         # Cross-entropy loss.
         loss = F.cross_entropy(
