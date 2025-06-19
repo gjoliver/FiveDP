@@ -182,7 +182,7 @@ class GPT(nn.Module):
 
         # apply special scaled init to the residual projections, per GPT-2 paper
         for n, p in self.named_parameters():
-            if n.endswith('c_proj.weight'):
+            if n.endswith('proj.weight'):
                 torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
 
         # report number of parameters
