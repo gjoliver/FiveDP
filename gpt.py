@@ -84,7 +84,7 @@ class CausalSelfAttention(nn.Module):
         self.dropout = config.dropout
 
         # key, query, value projections for all heads, but in a batch
-        self.attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
+        self.qkv = nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
 
         # output projection
         self.proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
@@ -97,7 +97,7 @@ class CausalSelfAttention(nn.Module):
         B, T, D = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
 
         # calculate query, key, values for all heads in batch.
-        q, k, v  = self.attn(x).split(self.n_embd, dim=2)
+        q, k, v  = self.qkv(x).split(self.n_embd, dim=2)
 
         k = k.view(B, T, self.n_head, self.d_head).transpose(1, 2) # (B, nh, T, hs)
         q = q.view(B, T, self.n_head, self.d_head).transpose(1, 2) # (B, nh, T, hs)
@@ -359,11 +359,11 @@ def _apply_sp_tp(model, stp_mesh):
     for transformer_block in model.attns:
         layer_plan = {
             "ln_1": SequenceParallel(),
-            "attn": PrepareModuleInput(
+            "attns": PrepareModuleInput(
                 input_layouts=(Shard(1), None),  # Because of ln_1 SequenceParallel.
                 desired_input_layouts=(Replicate(), None),  # ATTN itself is TP.
             ),
-            "attn.attn": ColwiseParallel(),  # Columnwise QKV projection.
+            "attn.qkv": ColwiseParallel(),  # Columnwise QKV projection.
             "attn.proj": RowwiseParallel(),  # Rowwise FFN projection.
             "ln_2": SequenceParallel(),
             "mlp": PrepareModuleInput(
