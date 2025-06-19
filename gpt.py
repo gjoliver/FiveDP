@@ -192,20 +192,21 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, input_ids, is_training: bool = False):
+    def _pos(self, input_ids):
         device = input_ids.device
-        _, t = input_ids.size()
-        assert t <= self.config.context_length, (
-            f"Cannot forward sequence of length {t}, block size is only {self.config.context_length}"
+        _, seq_len = input_ids.size()
+        assert seq_len <= self.config.context_length, (
+            f"Cannot forward sequence of length {seq_len}, "
+            f"block size is only {self.config.context_length}"
         )
-        pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
+        return torch.arange(0, seq_len, dtype=torch.long, device=device)
 
-        # forward the GPT model itself
-
+    def forward(self, input_ids, is_training: bool = False):
         # token embeddings of shape (b, t, n_embd)
         tok_emb = self.wte(input_ids)
         # position embeddings of shape (t, n_embd)
-        pos_emb = self.wpe(pos)
+        pos_emb = self.wpe(self._pos(input_ids))
+
         # Random input drop out.
         x = self.drop(tok_emb + pos_emb)
         # Transformer stack.
@@ -333,11 +334,16 @@ def _apply_sp_tp(model, stp_mesh) -> torch.nn.Module:
         {
             "wte": RowwiseParallel(
                 input_layouts=Replicate(),
-                output_layouts=Shard(1),  # Desired output is shard on dimension 1 (sequence parallel).
+                # Desired output is shard on dimension 1 (sequence parallel).
+                output_layouts=Shard(1),
             ),
             "wpe": RowwiseParallel(
                 input_layouts=Replicate(),
-                output_layouts=Shard(1),  # Desired output is shard on dimension 1 (sequence parallel).
+                # Desired output is shard on dimension 0 (sequence parallel).
+                # Note that positional embedding is a 1-D array that gets
+                # applied to all prompts in a batch. So dimension 0 is
+                # the sequence dimension.
+                output_layouts=Shard(0),
             ),
             # LayerNorm needs to handle sequence parallel because above.
             "ln_f": SequenceParallel(),
