@@ -359,9 +359,6 @@ def _apply_sp_tp(model, stp_mesh) -> torch.nn.Module:
     )
 
     # Apply tensor + sequence parallelism to every transformer block
-    # NOTE: At the cost of model code change, we can accelerate Sequence Parallel
-    #       by folding (and unfolding) the batch dimension and the sequence dimension.
-    #       Examples can be found at https://github.com/pytorch/torchtitan/pull/437
     for transformer_block in model.attns:
         layer_plan = {
             "ln_1": SequenceParallel(),
@@ -460,7 +457,7 @@ def launch():
 
     processes = []
     for i in range(WORLD_SIZE):
-        process = mp.Process(target=train, args=(WORLD_SIZE, i))
+        process = mp.Process(target=train, args=(WORLD_SIZE, i), daemon=True)
         process.start()
         processes.append(process)
 
