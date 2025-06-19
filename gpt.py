@@ -1,5 +1,6 @@
 # pyright: reportGeneralTypeIssues=false, reportAttributeAccessIssue=false, reportCallIssue=false, reportArgumentType=false
 
+import logging
 import math
 from dataclasses import dataclass
 import os
@@ -26,6 +27,21 @@ from transformers import GPT2Tokenizer
 IGNORE_INDEX = -100
 WORLD_SIZE = 8
 BATCH_SIZE = 1
+
+
+LOGGER = None
+
+
+def _init_logger(rank):
+        global LOGGER
+
+        LOGGER = logging.getLogger(f'rank_{rank}')
+        LOGGER.setLevel(logging.INFO)
+
+        handler = logging.StreamHandler()
+        formatter = logging.Formatter(f'[Rank {rank}] %(levelname)s: %(message)s')
+        handler.setFormatter(formatter)
+        LOGGER.addHandler(handler)
 
 
 @dataclass
@@ -170,7 +186,7 @@ class GPT(nn.Module):
                 torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
 
         # report number of parameters
-        print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        LOGGER.info("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
 
     def get_num_params(self, non_embedding=True):
         """
@@ -280,7 +296,7 @@ def _optimizer(gpt: torch.nn.Module):
 
 
 def _dataloader(replicas: int, rank: int):
-    print(f"Creating dataloader, {replicas} replicas, rank {rank}.")
+    LOGGER.info(f"Creating dataloader, {replicas} replicas, rank {rank}.")
 
     def _collate(batch):
         return [
@@ -388,12 +404,13 @@ def _apply_sp_tp(model, stp_mesh) -> torch.nn.Module:
 
 def train(world_size: int, rank: int):
     _init_dist(world_size, rank)
+    _init_logger(rank)
 
     device = torch.device(f"cuda:{rank}")
 
     # 2D device mesh on CPU.
     # Simulate DDP between instances, and FSDP between GPUs on a same instance.
-    #device_mesh = dist.init_device_mesh(
+    # device_mesh = dist.init_device_mesh(
     #    device_type="cuda", mesh_shape=(2, 2, 2), mesh_dim_names=("ddp", "fsdp", "sp/tp")
     #)
     device_mesh = dist.init_device_mesh(
@@ -403,7 +420,7 @@ def train(world_size: int, rank: int):
     # Prepare the model.
     gpt = GPT(GPTConfig()).to(device)
     # HSDP: Inter-node DDP + intra-node FSDP.
-    gpt = _apply_hsdp(gpt, device_mesh["ddp", "fsdp"])
+    # gpt = _apply_hsdp(gpt, device_mesh["ddp", "fsdp"])
     # SP & TP.
     gpt = _apply_sp_tp(gpt, device_mesh["sp/tp"])
 
@@ -418,7 +435,7 @@ def train(world_size: int, rank: int):
     dataloader = _dataloader(replicas=device_mesh.size(), rank=device_mesh.get_rank())
 
     for i, batch in enumerate(dataloader):
-        print(f"step {i}")
+        LOGGER.info(f"step {i}")
 
         # Input and labels.
         inputs = tokenizer(batch, padding=True, truncation=True, return_tensors='pt')
