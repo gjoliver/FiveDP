@@ -58,15 +58,15 @@ class LayerNorm(nn.Module):
 class MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.c_fc    = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
+        self.fc    = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
         self.gelu    = nn.GELU()
-        self.c_proj  = nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
+        self.proj  = nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
         self.dropout = nn.Dropout(config.dropout)
 
     def forward(self, x):
-        x = self.c_fc(x)
+        x = self.fc(x)
         x = self.gelu(x)
-        x = self.c_proj(x)
+        x = self.proj(x)
         x = self.dropout(x)
         return x
 
@@ -84,10 +84,10 @@ class CausalSelfAttention(nn.Module):
         self.dropout = config.dropout
 
         # key, query, value projections for all heads, but in a batch
-        self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
+        self.attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
 
         # output projection
-        self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
+        self.proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
 
         # regularization
         self.attn_dropout = nn.Dropout(config.dropout)
@@ -97,7 +97,7 @@ class CausalSelfAttention(nn.Module):
         B, T, D = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
 
         # calculate query, key, values for all heads in batch.
-        q, k, v  = self.c_attn(x).split(self.n_embd, dim=2)
+        q, k, v  = self.attn(x).split(self.n_embd, dim=2)
 
         k = k.view(B, T, self.n_head, self.d_head).transpose(1, 2) # (B, nh, T, hs)
         q = q.view(B, T, self.n_head, self.d_head).transpose(1, 2) # (B, nh, T, hs)
@@ -117,7 +117,7 @@ class CausalSelfAttention(nn.Module):
         y = y.transpose(1, 2).contiguous().view(B, T, D)
 
         # output projection
-        y = self.resid_dropout(self.c_proj(y))
+        y = self.resid_dropout(self.proj(y))
 
         return y
 
@@ -356,23 +356,22 @@ def _apply_sp_tp(model, stp_mesh):
     # NOTE: At the cost of model code change, we can accelerate Sequence Parallel
     #       by folding (and unfolding) the batch dimension and the sequence dimension.
     #       Examples can be found at https://github.com/pytorch/torchtitan/pull/437
-    for transformer_block in model.attns.values():
+    for transformer_block in model.attns:
         layer_plan = {
             "ln_1": SequenceParallel(),
             "attn": PrepareModuleInput(
                 input_layouts=(Shard(1), None),  # Because of ln_1 SequenceParallel.
                 desired_input_layouts=(Replicate(), None),  # ATTN itself is TP.
             ),
-            "attn.c_attn": ColwiseParallel(),  # Columnwise QKV projection.
-            "attn.c_proj": RowwiseParallel(),  # Rowwise FFN projection.
+            "attn.attn": ColwiseParallel(),  # Columnwise QKV projection.
+            "attn.proj": RowwiseParallel(),  # Rowwise FFN projection.
             "ln_2": SequenceParallel(),
             "mlp": PrepareModuleInput(
                 input_layouts=(Shard(1),),  # Because of ln_2 SequenceParallel.
                 desired_input_layouts=(Replicate(),),  # MLP itself is TP.
             ),
-            "mlp.c_fc": ColwiseParallel(),
-            "mlp.gelu": RowwiseParallel(output_layouts=Shard(1)),
-            "mlp.c_proj": ColwiseParallel(),
+            "mlp.fc": ColwiseParallel(),
+            "mlp.proj": RowwiseParallel(),
         }
 
         parallelize_module(
@@ -388,7 +387,7 @@ def train(world_size: int, rank: int):
     # 2D device mesh on CPU.
     # Simulate DDP between instances, and FSDP between GPUs on a same instance.
     device_mesh = dist.init_device_mesh(
-        device_type="cuda", mesh_shape=(2, 2, 2), mesh_dim_names=("ddp", "fsdp", "stp")
+        device_type="cuda", mesh_shape=(2, 2, 2), mesh_dim_names=("ddp", "fsdp", "sp/tp")
     )
 
     # Prepare the model.
@@ -396,7 +395,7 @@ def train(world_size: int, rank: int):
     # HSDP: Inter-node DDP + intra-node FSDP.
     gpt = _apply_hsdp(gpt, device_mesh["ddp", "fsdp"])
     # SP & TP.
-    gpt = _apply_sp_tp(gpt, device_mesh["stp"])
+    gpt = _apply_sp_tp(gpt, device_mesh["sp/tp"])
 
     # Tokenizer
     tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
