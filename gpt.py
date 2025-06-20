@@ -9,7 +9,7 @@ from datasets import load_dataset
 import torch
 import torch.distributed as dist
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, ShardingStrategy, StateDictType
-from torch.distributed.tensor import Replicate, Shard
+from torch.distributed.tensor import DTensor, Replicate, Shard
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
     parallelize_module,
@@ -24,7 +24,6 @@ from torch.utils.data import DataLoader, DistributedSampler
 from transformers import GPT2Tokenizer
 
 
-IGNORE_INDEX = -100
 WORLD_SIZE = 4
 BATCH_SIZE = 1
 
@@ -113,11 +112,23 @@ class CausalSelfAttention(nn.Module):
         self.attn_dropout = nn.Dropout(config.dropout)
         self.resid_dropout = nn.Dropout(config.dropout)
 
-    def forward(self, x):
+    def _attn_mask_to_dtensor(self, attn_mask, dt):
+        return DTensor.from_local(
+            attn_mask,
+            device_mesh=dt.device_mesh,
+            placements=[Replicate() for _ in dt.placements],
+        )
+
+    def forward(self, x, attn_mask):
         B, T, D = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
 
         # Calculate query, key, values for all heads in batch.
         q, k, v  = self.qkv(x).chunk(chunks=3, dim=2)
+
+        # Mask out padding tokens.
+        attn_mask = self._attn_mask_to_dtensor(attn_mask, k)
+        k = k.masked_fill(attn_mask.unsqueeze(-1), 0)
+        v = v.masked_fill(attn_mask.unsqueeze(-1), 0)
 
         # [B, T, nh, dh] -> [B, nh, T, dh]
         # Use -1 to calculate how many attention heads there are per TP rank.
@@ -130,7 +141,7 @@ class CausalSelfAttention(nn.Module):
             q,
             k,
             v,
-            attn_mask=None,
+            attn_mask=None,  # Can't use attn_mask here when is_causal=True.
             dropout_p=self.dropout if self.training else 0,
             is_causal=True,
         )
@@ -154,9 +165,9 @@ class AttnBlock(nn.Module):
         self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
         self.mlp = MLP(config)
 
-    def forward(self, x):
+    def forward(self, x, attn_mask):
         # Residue Attention. LayerNorm before Attention.
-        x = x + self.attn(self.ln_1(x))
+        x = x + self.attn(self.ln_1(x), attn_mask)
         # Residue MLP. LayerNorm before MLP.
         x = x + self.mlp(self.ln_2(x))
         return x
@@ -225,7 +236,7 @@ class GPT(nn.Module):
         )
         return torch.arange(0, seq_len, dtype=torch.long, device=device)
 
-    def forward(self, input_ids, is_training: bool = False):
+    def forward(self, input_ids, attn_mask, is_training: bool = False):
         # token embeddings of shape (b, t, n_embd)
         tok_emb = self.wte(input_ids)
         # position embeddings of shape (t, n_embd)
@@ -235,7 +246,7 @@ class GPT(nn.Module):
         x = self.drop(tok_emb + pos_emb)
         # Transformer stack.
         for block in self.attns:
-            x = block(x)
+            x = block(x, attn_mask)
         # LayerNorm before logits head.
         x = self.ln_f(x)
 
@@ -387,8 +398,11 @@ def _apply_sp_tp(model, stp_mesh) -> torch.nn.Module:
         layer_plan = {
             "ln_1": SequenceParallel(),
             "attn": PrepareModuleInput(
-                input_layouts=(Shard(1),),  # Because of ln_1 SequenceParallel.
-                desired_input_layouts=(Replicate(),),  # ATTNS itself is TP.
+                # input_ids is sharded in sequence dim because of ln_1.
+                # attn_mask is not sharded.
+                input_layouts=(Shard(1), Replicate()),
+                # Both inputs to attention module should be fully replicated.
+                desired_input_layouts=(Replicate(), Replicate()),
             ),
             "attn.qkv": ColwiseParallel(),  # Columnwise QKV projection.
             # Rowwise FFN projection.
@@ -476,10 +490,11 @@ def train(world_size: int, rank: int):
         input_ids = inputs["input_ids"].to(device)
         # Mask out paddings.
         attn_mask = inputs["attention_mask"].to(torch.bool).to(device)
-        input_ids[~attn_mask] = IGNORE_INDEX
 
         # Compute probabilities.
-        logits = gpt.forward(input_ids=input_ids, is_training=True)
+        logits = gpt.forward(
+            input_ids=input_ids, attn_mask=attn_mask, is_training=True,
+        )
 
         shifted_logits = logits[..., :-1, :].contiguous()
         shifted_labels = input_ids[..., 1:].contiguous()
@@ -488,7 +503,6 @@ def train(world_size: int, rank: int):
         loss = F.cross_entropy(
             shifted_logits.view(-1, shifted_logits.size(-1)),
             shifted_labels.view(-1),
-            ignore_index=IGNORE_INDEX,
         )
 
         LOGGER.info(f"loss: {loss}")
