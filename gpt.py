@@ -25,7 +25,7 @@ from transformers import GPT2Tokenizer
 
 
 IGNORE_INDEX = -100
-WORLD_SIZE = 8
+WORLD_SIZE = 4
 BATCH_SIZE = 1
 
 
@@ -58,7 +58,7 @@ class GPTConfig:
     dropout: float = 0.0
     bias: bool = True
 
-    dp_size: int = 2  # DDP
+    dp_size: int = 1  # DDP
     fsdp_size: int = 2  # FSDP
     cp_size: int = 2  # Context Parallel
     tp_sp_size: int = 2  # Tensor and Sequence Parallel
@@ -489,6 +489,8 @@ def train(world_size: int, rank: int):
             shifted_labels.view(-1),
             ignore_index=IGNORE_INDEX,
         )
+
+        LOGGER.info(f"loss: {loss}")
 
         # Gradient step.
         loss.backward()
