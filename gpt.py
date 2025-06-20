@@ -316,14 +316,14 @@ def _dataloader(replicas: int, dp_rank: int):
         dataset,
         num_replicas=replicas,
         rank=dp_rank,
-        shuffle=True,
+        shuffle=False,  # Be consistent across TP/SP ranks.
     )
     dataloader = DataLoader(
         dataset,
         sampler=sampler,
         batch_size=BATCH_SIZE,
         collate_fn=_collate,
-        shuffle=False,
+        shuffle=False,  # Be consistent across TP/SP ranks.
     )
     return dataloader
 
