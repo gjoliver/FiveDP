@@ -435,19 +435,18 @@ def train(world_size: int, rank: int):
 
     # 2D device mesh on CPU.
     # Simulate DDP between instances, and FSDP between GPUs on a same instance.
-    # device_mesh = dist.init_device_mesh(
-    #    device_type="cuda", mesh_shape=(2, 2, 2), mesh_dim_names=("ddp", "fsdp", "sp/tp")
-    #)
     device_mesh = dist.init_device_mesh(
-        device_type="cuda", mesh_shape=(1, 1, 8), mesh_dim_names=("ddp", "fsdp", "sp/tp",)
+        device_type="cuda",
+        mesh_shape=(cfg.dp_size, cfg.fsdp_size, cfg.tp_sp_size),
+        mesh_dim_names=("ddp", "fsdp", "sp/tp",),
     )
 
     # Prepare the model.
     gpt = GPT(cfg).to(device)
-    # HSDP: Inter-node DDP + intra-node FSDP.
-    # gpt = _apply_hsdp(gpt, device_mesh["ddp", "fsdp"])
     # SP & TP.
     gpt = _apply_sp_tp(gpt, device_mesh["sp/tp"])
+    # HSDP: Inter-node DDP + intra-node FSDP.
+    gpt = _apply_hsdp(gpt, device_mesh["ddp", "fsdp"])
 
     # Tokenizer
     tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
@@ -468,7 +467,7 @@ def train(world_size: int, rank: int):
         inputs = tokenizer(
             batch,
             padding=True,
-            pad_to_multiple_of=8,
+            pad_to_multiple_of=cfg.tp_sp_size,
             truncation=True,
             return_tensors='pt',
         )
