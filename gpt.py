@@ -416,13 +416,14 @@ def _apply_sp_tp(model, stp_mesh) -> torch.nn.Module:
 
 
 def _get_dp_rank(device_mesh, global_rank):
+    shape = device_mesh.mesh.shape
     # This is the rank we use to partition input data.
     rank_coords = (device_mesh.mesh == global_rank).nonzero().flatten()
     # We assume the outer most dims are "ddp" and "fsdp",
     # so there must be at least 2 indices in the coordinates array.
     assert len(rank_coords) >= 2
-    # Global DP rank is the multiplication of the first 2 dims.
-    return (rank_coords[0] + 1) * (rank_coords[1] + 1) - 1
+    # Global DP rank is the ddp_idx * ddp_size + fsdp_idx.
+    return rank_coords[0] * shape[0] + rank_coords[1]
 
 
 def train(world_size: int, rank: int):
