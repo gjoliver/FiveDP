@@ -24,7 +24,7 @@ from torch.utils.data import DataLoader, DistributedSampler
 from transformers import GPT2Tokenizer
 
 
-WORLD_SIZE = 4
+WORLD_SIZE = 8
 BATCH_SIZE = 1
 
 
@@ -57,7 +57,7 @@ class GPTConfig:
     dropout: float = 0.0
     bias: bool = True
 
-    dp_size: int = 1  # DDP
+    dp_size: int = 2  # DDP
     fsdp_size: int = 2  # FSDP
     cp_size: int = 2  # Context Parallel
     tp_sp_size: int = 2  # Tensor and Sequence Parallel
