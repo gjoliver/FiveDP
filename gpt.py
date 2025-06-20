@@ -336,12 +336,12 @@ def _init_dist(world_size: int, rank: int):
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
 
 
-def _apply_hsdp(model, device_mesh) -> torch.nn.Module:
+def _apply_hsdp(model, device_mesh, device) -> torch.nn.Module:
     return FSDP(
         model,
         device_mesh=device_mesh,
         sharding_strategy=ShardingStrategy.HYBRID_SHARD,  # DDP + FSDP
-        device_id=torch.device("cuda:0"),
+        device_id=device,
         sync_module_states=True,  # Make sure models on different DDP ranks are synced.
     )
 
@@ -446,7 +446,7 @@ def train(world_size: int, rank: int):
     # SP & TP.
     gpt = _apply_sp_tp(gpt, device_mesh["sp/tp"])
     # HSDP: Inter-node DDP + intra-node FSDP.
-    gpt = _apply_hsdp(gpt, device_mesh["ddp", "fsdp"])
+    gpt = _apply_hsdp(gpt, device_mesh["ddp", "fsdp"], device)
 
     # Tokenizer
     tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
