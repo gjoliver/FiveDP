@@ -58,6 +58,11 @@ class GPTConfig:
     dropout: float = 0.0
     bias: bool = True
 
+    dp_size: int = 2  # DDP
+    fsdp_size: int = 2  # FSDP
+    cp_size: int = 2  # Context Parallel
+    tp_sp_size: int = 2  # Tensor and Sequence Parallel
+
 
 class LayerNorm(nn.Module):
     def __init__(self, ndim: int, bias: bool):
@@ -379,18 +384,23 @@ def _apply_sp_tp(model, stp_mesh) -> torch.nn.Module:
         layer_plan = {
             "ln_1": SequenceParallel(),
             "attns": PrepareModuleInput(
-                input_layouts=(Shard(1), None),  # Because of ln_1 SequenceParallel.
-                desired_input_layouts=(Replicate(), None),  # ATTN itself is TP.
+                input_layouts=(Shard(1),),  # Because of ln_1 SequenceParallel.
+                desired_input_layouts=(Replicate(),),  # ATTNS itself is TP.
             ),
             "attn.qkv": ColwiseParallel(),  # Columnwise QKV projection.
-            "attn.proj": RowwiseParallel(),  # Rowwise FFN projection.
+            # Rowwise FFN projection.
+            # Output should be sharded on sequence dimension to prepare for
+            # the sequence parallelized MLP LayerNorm.
+            "attn.proj": RowwiseParallel(output_layouts=Shard(1)),
             "ln_2": SequenceParallel(),
             "mlp": PrepareModuleInput(
                 input_layouts=(Shard(1),),  # Because of ln_2 SequenceParallel.
                 desired_input_layouts=(Replicate(),),  # MLP itself is TP.
             ),
             "mlp.fc": ColwiseParallel(),
-            "mlp.proj": RowwiseParallel(),
+            # Output should be sharded on sequence dimension to prepare for
+            # the sequence parallelized Attn LayerNorm of the next block.
+            "mlp.proj": RowwiseParallel(output_layouts=Shard(1)),
         }
 
         parallelize_module(
@@ -409,7 +419,7 @@ def _get_dp_rank(device_mesh, global_rank):
     # so there must be at least 2 indices in the coordinates array.
     assert len(rank_coords) >= 2
     # Global DP rank is the multiplication of the first 2 dims.
-    return rank_coords[0] * rank_coords[1]
+    return (rank_coords[0] + 1) * (rank_coords[1] + 1) - 1
 
 
 def train(world_size: int, rank: int):
@@ -417,6 +427,8 @@ def train(world_size: int, rank: int):
     _init_logger(rank)
 
     device = torch.device(f"cuda:{rank}")
+
+    cfg = GPTConfig()
 
     # 2D device mesh on CPU.
     # Simulate DDP between instances, and FSDP between GPUs on a same instance.
@@ -428,7 +440,7 @@ def train(world_size: int, rank: int):
     )
 
     # Prepare the model.
-    gpt = GPT(GPTConfig()).to(device)
+    gpt = GPT(cfg).to(device)
     # HSDP: Inter-node DDP + intra-node FSDP.
     # gpt = _apply_hsdp(gpt, device_mesh["ddp", "fsdp"])
     # SP & TP.
@@ -450,7 +462,13 @@ def train(world_size: int, rank: int):
         LOGGER.info(f"step {i}")
 
         # Input and labels.
-        inputs = tokenizer(batch, padding=True, truncation=True, return_tensors='pt')
+        inputs = tokenizer(
+            batch,
+            padding=True,
+            pad_to_multiple_of=8,
+            truncation=True,
+            return_tensors='pt',
+        )
 
         input_ids = inputs["input_ids"].to(device)
         # Mask out paddings.
