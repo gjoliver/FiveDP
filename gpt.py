@@ -99,7 +99,6 @@ class CausalSelfAttention(nn.Module):
         # embedding size needs to be evenly split to multiple heads.
         assert config.n_embd % config.n_head == 0
 
-        self.n_head = config.n_head
         self.n_embd = config.n_embd
         self.d_head = config.n_embd // config.n_head
         self.dropout = config.dropout
@@ -117,12 +116,14 @@ class CausalSelfAttention(nn.Module):
     def forward(self, x):
         B, T, D = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
 
-        # calculate query, key, values for all heads in batch.
-        q, k, v  = self.qkv(x).split(self.n_embd, dim=2)
+        # Calculate query, key, values for all heads in batch.
+        q, k, v  = self.qkv(x).chunk(chunks=3, dim=2)
 
-        k = k.view(B, T, self.n_head, self.d_head).transpose(1, 2) # (B, nh, T, hs)
-        q = q.view(B, T, self.n_head, self.d_head).transpose(1, 2) # (B, nh, T, hs)
-        v = v.view(B, T, self.n_head, self.d_head).transpose(1, 2) # (B, nh, T, hs)
+        # [B, T, nh, dh] -> [B, nh, T, dh]
+        # Use -1 to calculate how many attention heads there are per TP rank.
+        k = k.view(B, T, -1, self.d_head).transpose(1, 2)
+        q = q.view(B, T, -1, self.d_head).transpose(1, 2)
+        v = v.view(B, T, -1, self.d_head).transpose(1, 2)
 
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
         y = torch.nn.functional.scaled_dot_product_attention(
@@ -134,8 +135,10 @@ class CausalSelfAttention(nn.Module):
             is_causal=True,
         )
 
-        # re-assemble all head outputs side by side
-        y = y.transpose(1, 2).contiguous().view(B, T, D)
+        # re-assemble all head outputs side by side.
+        # [B, nh, T, dh] -> [B, T, D].
+        # Agani use -1 to automatically calculate embedding size per TP rank.
+        y = y.transpose(1, 2).contiguous().view(B, T, -1)
 
         # output projection
         y = self.resid_dropout(self.proj(y))
@@ -330,7 +333,7 @@ def _init_dist(world_size: int, rank: int):
     os.environ['MASTER_PORT'] = '8888'
 
     # Initialize the process group
-    dist.init_process_group("gloo", rank=rank, world_size=world_size)
+    dist.init_process_group("nccl", rank=rank, world_size=world_size)
 
 
 def _apply_hsdp(model, device_mesh) -> torch.nn.Module:
@@ -383,7 +386,7 @@ def _apply_sp_tp(model, stp_mesh) -> torch.nn.Module:
     for transformer_block in model.attns:
         layer_plan = {
             "ln_1": SequenceParallel(),
-            "attns": PrepareModuleInput(
+            "attn": PrepareModuleInput(
                 input_layouts=(Shard(1),),  # Because of ln_1 SequenceParallel.
                 desired_input_layouts=(Replicate(),),  # ATTNS itself is TP.
             ),
