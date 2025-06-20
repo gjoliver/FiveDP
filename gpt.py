@@ -295,8 +295,8 @@ def _optimizer(gpt: torch.nn.Module):
     return torch.optim.AdamW(optim_groups, lr=6e-4, betas=(0.9, 0.95))
 
 
-def _dataloader(replicas: int, rank: int):
-    LOGGER.info(f"Creating dataloader, {replicas} replicas, rank {rank}.")
+def _dataloader(replicas: int, dp_rank: int):
+    LOGGER.info(f"Creating dataloader, {replicas} replicas, dp_rank {dp_rank}.")
 
     def _collate(batch):
         return [
@@ -307,7 +307,7 @@ def _dataloader(replicas: int, rank: int):
     sampler = DistributedSampler(
         dataset,
         num_replicas=replicas,
-        rank=rank,
+        rank=dp_rank,
         shuffle=True,
     )
     dataloader = DataLoader(
@@ -402,6 +402,16 @@ def _apply_sp_tp(model, stp_mesh) -> torch.nn.Module:
     return model
 
 
+def _get_dp_rank(device_mesh, global_rank):
+    # This is the rank we use to partition input data.
+    rank_coords = (device_mesh.mesh == global_rank).nonzero().flatten()
+    # We assume the outer most dims are "ddp" and "fsdp",
+    # so there must be at least 2 indices in the coordinates array.
+    assert len(rank_coords) >= 2
+    # Global DP rank is the multiplication of the first 2 dims.
+    return rank_coords[0] * rank_coords[1]
+
+
 def train(world_size: int, rank: int):
     _init_dist(world_size, rank)
     _init_logger(rank)
@@ -414,7 +424,7 @@ def train(world_size: int, rank: int):
     #    device_type="cuda", mesh_shape=(2, 2, 2), mesh_dim_names=("ddp", "fsdp", "sp/tp")
     #)
     device_mesh = dist.init_device_mesh(
-        device_type="cuda", mesh_shape=(8,), mesh_dim_names=("sp/tp",)
+        device_type="cuda", mesh_shape=(1, 1, 8), mesh_dim_names=("ddp", "fsdp", "sp/tp",)
     )
 
     # Prepare the model.
@@ -432,7 +442,9 @@ def train(world_size: int, rank: int):
     optimizer = _optimizer(gpt)
 
     # Dataloader.
-    dataloader = _dataloader(replicas=device_mesh.size(), rank=device_mesh.get_rank())
+    dataloader = _dataloader(
+        replicas=device_mesh.size(), dp_rank=_get_dp_rank(device_mesh, rank),
+    )
 
     for i, batch in enumerate(dataloader):
         LOGGER.info(f"step {i}")
