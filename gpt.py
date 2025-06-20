@@ -112,21 +112,15 @@ class CausalSelfAttention(nn.Module):
         self.attn_dropout = nn.Dropout(config.dropout)
         self.resid_dropout = nn.Dropout(config.dropout)
 
-    def _attn_mask_to_dtensor(self, attn_mask, dt):
-        return DTensor.from_local(
-            attn_mask,
-            device_mesh=dt.device_mesh,
-            placements=[Replicate() for _ in dt.placements],
-        )
-
     def forward(self, x, attn_mask):
         B, T, D = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
 
         # Calculate query, key, values for all heads in batch.
         q, k, v  = self.qkv(x).chunk(chunks=3, dim=2)
 
-        # Mask out padding tokens.
-        attn_mask = self._attn_mask_to_dtensor(attn_mask, k)
+        # Mask out padding tokens. Input attn_mask is a DTensor at this point,
+        # because of the sharding plan.
+        attn_mask = attn_mask.to_local()
         k = k.masked_fill(attn_mask.unsqueeze(-1), 0)
         v = v.masked_fill(attn_mask.unsqueeze(-1), 0)
 
@@ -512,8 +506,6 @@ def train(world_size: int, rank: int):
         optimizer.step()
 
         optimizer.zero_grad(set_to_none=True)
-
-        break
 
     dist.destroy_process_group()
 
