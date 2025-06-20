@@ -10,6 +10,7 @@ import torch
 import torch.distributed as dist
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, ShardingStrategy, StateDictType
 from torch.distributed.tensor import DTensor, Replicate, Shard
+from torch.distributed.tensor.experimental import context_parallel
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
     parallelize_module,
@@ -57,7 +58,7 @@ class GPTConfig:
     dropout: float = 0.0
     bias: bool = True
 
-    dp_size: int = 2  # DDP
+    dp_size: int = 1  # DDP
     fsdp_size: int = 2  # FSDP
     cp_size: int = 2  # Context Parallel
     tp_sp_size: int = 2  # Tensor and Sequence Parallel
@@ -446,16 +447,20 @@ def train(world_size: int, rank: int):
     # Simulate DDP between instances, and FSDP between GPUs on a same instance.
     device_mesh = dist.init_device_mesh(
         device_type="cuda",
-        mesh_shape=(cfg.dp_size, cfg.fsdp_size, cfg.tp_sp_size),
-        mesh_dim_names=("ddp", "fsdp", "sp/tp",),
+        mesh_shape=(cfg.dp_size, cfg.fsdp_size, cfg.cp_size, cfg.tp_sp_size),
+        mesh_dim_names=("ddp", "fsdp", "cp", "sp/tp",),
     )
+
+    # Flatten "fsdp" and "cp" into the "fsdp_cp" mesh.
+    # This is necessary when both fsdp and cp are enabled.
+    device_mesh["fsdp", "cp"]._flatten(mesh_dim_name="fsdp/cp")
 
     # Prepare the model.
     gpt = GPT(cfg).to(device)
     # SP & TP.
     gpt = _apply_sp_tp(gpt, device_mesh["sp/tp"])
     # HSDP: Inter-node DDP + intra-node FSDP.
-    gpt = _apply_hsdp(gpt, device_mesh["ddp", "fsdp"], device)
+    gpt = _apply_hsdp(gpt, device_mesh["ddp", "fsdp/cp"], device)
 
     # Tokenizer
     tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
@@ -476,7 +481,7 @@ def train(world_size: int, rank: int):
         inputs = tokenizer(
             batch,
             padding=True,
-            pad_to_multiple_of=cfg.tp_sp_size,
+            pad_to_multiple_of=(cfg.cp_size * cfg.tp_sp_size),
             truncation=True,
             return_tensors='pt',
         )
@@ -485,25 +490,34 @@ def train(world_size: int, rank: int):
         # Mask out paddings.
         attn_mask = inputs["attention_mask"].to(torch.bool).to(device)
 
-        # Compute probabilities.
-        logits = gpt.forward(
-            input_ids=input_ids, attn_mask=attn_mask, is_training=True,
-        )
+        context_parallel_ctx = context_parallel(
+			mesh=device_mesh["cp"],
+			buffers=[input_ids, attn_mask],
+            # shard on seq dimension
+			buffer_seq_dims=[1, 1],
+			no_restore_buffers={input_ids, attn_mask},
+		)
 
-        shifted_logits = logits[..., :-1, :].contiguous()
-        shifted_labels = input_ids[..., 1:].contiguous()
+        with context_parallel_ctx:
+            # Compute probabilities.
+            logits = gpt.forward(
+                input_ids=input_ids, attn_mask=attn_mask, is_training=True,
+            )
 
-        # Cross-entropy loss.
-        loss = F.cross_entropy(
-            shifted_logits.view(-1, shifted_logits.size(-1)),
-            shifted_labels.view(-1),
-        )
+            shifted_logits = logits[..., :-1, :].contiguous()
+            shifted_labels = input_ids[..., 1:].contiguous()
 
-        LOGGER.info(f"loss: {loss}")
+            # Cross-entropy loss.
+            loss = F.cross_entropy(
+                shifted_logits.view(-1, shifted_logits.size(-1)),
+                shifted_labels.view(-1),
+            )
 
-        # Gradient step.
-        loss.backward()
-        optimizer.step()
+            LOGGER.info(f"loss: {loss}")
+
+            # Gradient step.
+            loss.backward()
+            optimizer.step()
 
         optimizer.zero_grad(set_to_none=True)
 
