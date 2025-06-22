@@ -9,7 +9,7 @@ from datasets import load_dataset
 import torch
 import torch.distributed as dist
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, ShardingStrategy, StateDictType
-from torch.distributed.tensor import DTensor, Replicate, Shard
+from torch.distributed.tensor import Replicate, Shard
 from torch.distributed.tensor.experimental import context_parallel
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
@@ -21,6 +21,7 @@ from torch.distributed.tensor.parallel import (
 import torch.multiprocessing as mp
 import torch.nn as nn
 from torch.nn import functional as F
+from torch.nn.attention import SDPBackend, sdpa_kernel
 from torch.utils.data import DataLoader, DistributedSampler
 from transformers import GPT2Tokenizer
 
@@ -435,10 +436,7 @@ def _get_dp_rank(device_mesh, global_rank):
     return rank_coords[0] * shape[0] + rank_coords[1]
 
 
-def train(world_size: int, rank: int):
-    _init_dist(world_size, rank)
-    _init_logger(rank)
-
+def train_loop(rank: int):
     device = torch.device(f"cuda:{rank}")
 
     cfg = GPTConfig()
@@ -520,6 +518,19 @@ def train(world_size: int, rank: int):
             optimizer.step()
 
         optimizer.zero_grad(set_to_none=True)
+
+
+def train(world_size: int, rank: int):
+    _init_dist(world_size, rank)
+    _init_logger(rank)
+
+    # Autocast because torch flash attention only works with half precision.
+    with torch.autocast(device_type="cuda"):
+        # As of 2.7.0, context parallel only works with FLASH_ATTENTION kernel.
+        # I did run into weird problems like output tensor has a different shape
+        # when I tried memory efficient SDPA kernel.
+        with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
+            train_loop(rank)
 
     dist.destroy_process_group()
 
