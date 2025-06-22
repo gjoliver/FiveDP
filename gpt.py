@@ -8,6 +8,7 @@ import os
 from datasets import load_dataset
 import torch
 import torch.distributed as dist
+from torch.distributed.checkpoint.filesystem import FileSystemWriter
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, ShardingStrategy, StateDictType
 from torch.distributed.tensor import Replicate, Shard
 from torch.distributed.tensor.experimental import context_parallel
@@ -336,8 +337,9 @@ def _dataloader(replicas: int, dp_rank: int):
 
 
 def _init_dist(world_size: int, rank: int):
-    os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '8888'
+    os.environ["MASTER_ADDR"] = 'localhost'
+    os.environ["MASTER_PORT"] = '8888'
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(rank)
 
     # Initialize the process group
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
@@ -436,8 +438,21 @@ def _get_dp_rank(device_mesh, global_rank):
     return rank_coords[0] * shape[0] + rank_coords[1]
 
 
+def _checkpoint(config, model, optimizer):
+    state_dict = {
+        "cfg": config,
+        "model": model.state_dict(),
+        "optimizer": optimizer.state_dict(),
+    }
+    fs_storage_writer = FileSystemWriter("./dist_checkpoint/")
+    torch.distributed.checkpoint.save(
+        state_dict=state_dict,
+        storage_writer=fs_storage_writer,
+    )
+
+
 def train_loop(rank: int):
-    device = torch.device(f"cuda:{rank}")
+    device = torch.device("cuda:0")
 
     cfg = GPTConfig()
 
@@ -518,6 +533,9 @@ def train_loop(rank: int):
             optimizer.step()
 
         optimizer.zero_grad(set_to_none=True)
+
+    # Checkpoint at the end of training.
+    _checkpoint(cfg, gpt, optimizer)
 
 
 def train(world_size: int, rank: int):
