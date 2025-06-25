@@ -9,7 +9,7 @@ from datasets import load_dataset
 import torch
 import torch.distributed as dist
 from torch.distributed.checkpoint.filesystem import FileSystemWriter
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, ShardingStrategy, StateDictType
+from torch.distributed.fsdp import fully_shard
 from torch.distributed.tensor import Replicate, Shard
 from torch.distributed.tensor.experimental import context_parallel
 from torch.distributed.tensor.parallel import (
@@ -116,7 +116,9 @@ class CausalSelfAttention(nn.Module):
         self.resid_dropout = nn.Dropout(config.dropout)
 
     def forward(self, x, attn_mask):
-        B, T, D = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
+        print("local shape: ", self.qkv.weight._local_tensor.shape)
+
+        B, T, _ = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
 
         # Calculate query, key, values for all heads in batch.
         q, k, v  = self.qkv(x).chunk(chunks=3, dim=2)
@@ -286,16 +288,6 @@ class GPT(nn.Module):
         return input_ids
 
 
-def _print_weight(model: FSDP, name: str | None = None):
-    with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT):
-        state_dict = model.state_dict()
-
-    if name:
-        print(state_dict[name])
-    else:
-        print(next(iter(state_dict.values())))
-
-
 def _optimizer(gpt: torch.nn.Module):
     param_dict = {n: p for n, p in gpt.named_parameters() if p.requires_grad}
 
@@ -308,7 +300,7 @@ def _optimizer(gpt: torch.nn.Module):
         {'params': decay_params, 'weight_decay': 1e-1},
         {'params': nodecay_params, 'weight_decay': 0.0}
     ]
-    return torch.optim.AdamW(optim_groups, lr=6e-4, betas=(0.9, 0.95))
+    return torch.optim.AdamW(optim_groups, lr=6e-2, betas=(0.9, 0.95))
 
 
 def _dataloader(replicas: int, dp_rank: int):
@@ -342,17 +334,18 @@ def _init_dist(world_size: int, rank: int):
     os.environ["CUDA_VISIBLE_DEVICES"] = str(rank)
 
     # Initialize the process group
-    dist.init_process_group("nccl", rank=rank, world_size=world_size)
-
-
-def _apply_hsdp(model, device_mesh, device) -> torch.nn.Module:
-    return FSDP(
-        model,
-        device_mesh=device_mesh,
-        sharding_strategy=ShardingStrategy.HYBRID_SHARD,  # DDP + FSDP
-        device_id=device,
-        sync_module_states=True,  # Make sure models on different DDP ranks are synced.
+    dist.init_process_group(
+        "nccl", rank=rank, world_size=world_size, device_id=torch.device("cuda:0"),
     )
+
+
+def _apply_hsdp(model, device_mesh) -> torch.nn.Module:
+    # Parallelize all transformer blocks.
+    for block in model.attns:
+        fully_shard(block, mesh=device_mesh)
+
+    # Then parallelize top level module (may not be needed).
+    # fully_shard(model, mesh=device_mesh)
 
 
 def _apply_sp_tp(model, stp_mesh) -> torch.nn.Module:
@@ -423,8 +416,6 @@ def _apply_sp_tp(model, stp_mesh) -> torch.nn.Module:
             device_mesh=stp_mesh,
             parallelize_plan=layer_plan,
         )
-    
-    return model
 
 
 def _get_dp_rank(device_mesh, global_rank):
@@ -471,9 +462,9 @@ def train_loop(rank: int):
     # Prepare the model.
     gpt = GPT(cfg).to(device)
     # SP & TP.
-    gpt = _apply_sp_tp(gpt, device_mesh["sp/tp"])
+    _apply_sp_tp(gpt, device_mesh["sp/tp"])
     # HSDP: Inter-node DDP + intra-node FSDP.
-    gpt = _apply_hsdp(gpt, device_mesh["ddp", "fsdp/cp"], device)
+    _apply_hsdp(gpt, device_mesh["ddp", "fsdp/cp"])
 
     # Tokenizer
     tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
