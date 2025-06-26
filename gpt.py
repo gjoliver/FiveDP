@@ -116,10 +116,6 @@ class CausalSelfAttention(nn.Module):
         self.resid_dropout = nn.Dropout(config.dropout)
 
     def forward(self, x, attn_mask):
-        print("local shape: ", self.qkv.weight._local_tensor.shape)
-        print("device mesh: ", self.qkv.weight.device_mesh)
-        print("coordinates: ", self.qkv.weight.device_mesh.get_coordinate())
-
         B, T, _ = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
 
         # Calculate query, key, values for all heads in batch.

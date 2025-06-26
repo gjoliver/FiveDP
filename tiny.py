@@ -28,13 +28,15 @@ class TestModel(nn.Module):
         self.gelu = nn.GELU()
 
     def forward(self, x):
-        print(f"rank {self.rank} local shape:", self.fc.weight._local_tensor.shape)
-        print(
-            f"rank {self.rank} device mesh:",
-            self.fc.weight.device_mesh,
-            self.fc.weight.device_mesh.get_coordinate(),
-            self.fc.weight.placements,
-        )
+        if self.rank == 0:
+            print("model.fc in forward:")
+            print(f"\tlocal shape:", self.fc.weight._local_tensor.shape)
+            print(
+                f"\tdevice mesh:",
+                self.fc.weight.device_mesh,
+                self.fc.weight.device_mesh.get_coordinate(),
+                self.fc.weight.placements,
+            )
 
         x = self.fc(x)
         x = self.gelu(x)
@@ -78,8 +80,17 @@ def test(world_size, rank):
     )
 
     # Apply FSDP2.
-    fully_shard(model.fc, mesh=device_mesh["dp", "fsdp"], reshard_after_forward=True)
     fully_shard(model, mesh=device_mesh["dp", "fsdp"], reshard_after_forward=True)
+
+    if rank == 0:
+        print("model.fc:")
+        print(f"\tlocal shape:", model.fc.weight._local_tensor.shape)
+        print(
+            f"\tdevice mesh:",
+            model.fc.weight.device_mesh,
+            model.fc.weight.device_mesh.get_coordinate(),
+            model.fc.weight.placements,
+        )
 
     y = model(torch.randn((2, 256)))
 
