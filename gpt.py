@@ -117,6 +117,8 @@ class CausalSelfAttention(nn.Module):
 
     def forward(self, x, attn_mask):
         print("local shape: ", self.qkv.weight._local_tensor.shape)
+        print("device mesh: ", self.qkv.weight.device_mesh)
+        print("coordinates: ", self.qkv.weight.device_mesh.get_coordinate())
 
         B, T, _ = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
 
@@ -341,11 +343,16 @@ def _init_dist(world_size: int, rank: int):
 
 def _apply_hsdp(model, device_mesh) -> torch.nn.Module:
     # Parallelize all transformer blocks.
-    for block in model.attns:
-        fully_shard(block, mesh=device_mesh)
+    for i, child_module in enumerate(model.modules()):
+        if isinstance(child_module, (CausalSelfAttention, MLP)):
+            fully_shard(
+                child_module, mesh=device_mesh, reshard_after_forward=True,
+            )
 
-    # Then parallelize top level module (may not be needed).
-    # fully_shard(model, mesh=device_mesh)
+    # Parallelize parameters on root module if there is any.
+    fully_shard(
+        model, mesh=device_mesh, reshard_after_forward=False,
+    )
 
 
 def _apply_sp_tp(model, stp_mesh) -> torch.nn.Module:
