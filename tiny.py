@@ -6,9 +6,10 @@ import os
 import torch
 import torch.distributed as dist
 from torch.distributed.fsdp import fully_shard
-from torch.distributed.tensor import Replicate
+from torch.distributed.tensor import Replicate, Shard
 from torch.distributed.tensor.parallel import (
     parallelize_module,
+    ColwiseParallel,
     RowwiseParallel,
 )
 import torch.multiprocessing as mp
@@ -24,6 +25,7 @@ class TestModel(nn.Module):
 
         self.rank = rank
 
+        self.wte = nn.Embedding(100, 256)
         self.fc = nn.Linear(256, 64, bias=False)
         self.gelu = nn.GELU()
 
@@ -38,6 +40,7 @@ class TestModel(nn.Module):
                 self.fc.weight.placements,
             )
 
+        x = self.wte(x)
         x = self.fc(x)
         x = self.gelu(x)
         return x
@@ -71,6 +74,11 @@ def test(world_size, rank):
         model,
         device_mesh["tp"],
         {
+            "wte": ColwiseParallel(
+                input_layouts=Replicate(),
+                # Desired output is shard on dimension 1 (sequence parallel).
+                output_layouts=Replicate(),
+            ),
             "fc": RowwiseParallel(
                 input_layouts=Replicate(),
                 output_layouts=Replicate(),
@@ -92,7 +100,7 @@ def test(world_size, rank):
             model.fc.weight.placements,
         )
 
-    y = model(torch.randn((2, 256)))
+    y = model(torch.randint(low=0, high=100, size=(2, 25)))
 
     print(f"rank {rank}", y.shape)
 
