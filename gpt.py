@@ -336,15 +336,15 @@ def _init_dist(world_size: int, rank: int):
 
 def _apply_hsdp(model, device_mesh) -> torch.nn.Module:
     # Parallelize all transformer blocks.
-    for i, child_module in enumerate(model.modules()):
+    for child_module in model.modules():
         if isinstance(child_module, (CausalSelfAttention, MLP)):
             fully_shard(
                 child_module, mesh=device_mesh, reshard_after_forward=True,
             )
 
-    # Parallelize parameters on root module if there is any.
+    # Also shard the logit head at top level.
     fully_shard(
-        model, mesh=device_mesh, reshard_after_forward=False,
+        model.lm_head, mesh=device_mesh, reshard_after_forward=True,
     )
 
 
