@@ -329,12 +329,9 @@ def _dataloader(replicas: int, dp_rank: int):
 def _init_dist(world_size: int, rank: int):
     os.environ["MASTER_ADDR"] = 'localhost'
     os.environ["MASTER_PORT"] = '8888'
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(rank)
 
     # Initialize the process group
-    dist.init_process_group(
-        "nccl", rank=rank, world_size=world_size, device_id=torch.device("cuda:0"),
-    )
+    dist.init_process_group("gloo", rank=rank, world_size=world_size)
 
 
 def _apply_hsdp(model, device_mesh) -> torch.nn.Module:
@@ -446,14 +443,14 @@ def _checkpoint(config, model, optimizer):
 
 
 def train_loop(rank: int):
-    device = torch.device("cuda:0")
+    device = torch.device("cpu")
 
     cfg = GPTConfig()
 
     # 2D device mesh on CPU.
     # Simulate DDP between instances, and FSDP between GPUs on a same instance.
     device_mesh = dist.init_device_mesh(
-        device_type="cuda",
+        device_type="cpu",
         mesh_shape=(cfg.dp_size, cfg.fsdp_size, cfg.cp_size, cfg.tp_sp_size),
         mesh_dim_names=("ddp", "fsdp", "cp", "sp/tp",),
     )
@@ -537,7 +534,7 @@ def train(world_size: int, rank: int):
     _init_logger(rank)
 
     # Autocast because torch flash attention only works with half precision.
-    with torch.autocast(device_type="cuda"):
+    with torch.autocast(device_type="cpu"):
         # As of 2.7.0, context parallel only works with FLASH_ATTENTION kernel.
         # I did run into weird problems like output tensor has a different shape
         # when I tried memory efficient SDPA kernel.
