@@ -345,9 +345,24 @@ def _apply_hsdp(model, device_mesh) -> torch.nn.Module:
                 child_module, mesh=device_mesh, reshard_after_forward=True,
             )
 
-    # Also shard the logit head at top level.
+    # Also shard embedding & logit head at top level.
+    # For some reasons, we must shard wte and wpe specifically before
+    # calling fully_shard() on the top level model.
+    # Otherwise, wte will not all-gather the parameters when running
+    # inputs (which is only sharded at the sequence dimension).
+    # This also seems to improve performance a little bit:
+    # https://github.com/pytorch/torchtitan/issues/1091
     fully_shard(
-        model.lm_head, mesh=device_mesh, reshard_after_forward=True,
+        model.wte, mesh=device_mesh, reshard_after_forward=True,
+    )
+    fully_shard(
+        model.wpe, mesh=device_mesh, reshard_after_forward=True,
+    )
+    fully_shard(
+        model.ln_f, mesh=device_mesh, reshard_after_forward=True,
+    )
+    fully_shard(
+        model, mesh=device_mesh, reshard_after_forward=True,
     )
 
 
