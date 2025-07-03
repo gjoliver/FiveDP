@@ -340,7 +340,7 @@ def _init_dist(world_size: int, rank: int):
 def _apply_hsdp(model, device_mesh) -> torch.nn.Module:
     # Parallelize all transformer blocks.
     for child_module in model.modules():
-        if isinstance(child_module, (CausalSelfAttention, MLP)):
+        if isinstance(child_module, AttnBlock):
             fully_shard(
                 child_module, mesh=device_mesh, reshard_after_forward=True,
             )
